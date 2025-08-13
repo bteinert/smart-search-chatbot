@@ -1,0 +1,44 @@
+#ssgc-chatbot {
+    width: 720px;
+    border: 1px solid #ccc;
+    padding: 10px;
+    font-family: Arial, sans-serif;
+}
+
+#ssgc-chat-log {
+    height: 210px;
+    overflow-y: auto;
+    border: 1px solid #ddd;
+    padding: 5px;
+    margin-bottom: 10px;
+    background: #fafafa;
+}
+
+#ssgc-chat-log .You {
+    color: blue;
+}
+
+#ssgc-chat-log .Bot {
+    color: green;
+}
+
+#ssgc-chat-input {
+    width: 70%;
+    padding: 5px;
+}
+
+#ssgc-chat-send {
+    width: 25%;
+    padding: 5px;
+    cursor: pointer;
+}
+
+.error {
+    color: red;
+    font-style: italic;
+}
+
+.typing-indicator {
+    color: #888;
+    font-style: italic;
+}

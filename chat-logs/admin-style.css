@@ -1,0 +1,19 @@
+.wp-list-table th, .wp-list-table td {
+    word-break: break-word;
+    vertical-align: top;
+}
+
+.wp-list-table td button.ssc-delete-log {
+    background-color: #dc3232;
+    border: none;
+    color: white;
+    padding: 5px 8px;
+    cursor: pointer;
+    border-radius: 3px;
+    font-size: 12px;
+}
+
+.wp-list-table td button.ssc-delete-log:hover {
+    background-color: #a72525;
+}
+
