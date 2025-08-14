@@ -75,8 +75,7 @@ The chatbot provides:
 
 1. Navigate to **WordPress Admin → Settings → Chatbot Logs**
 2. View all chat conversations with timestamps
-3. Search and filter conversations
-4. Paginated display for large datasets
+3. Paginated display for large datasets
 
 ### Chat Logs Settings
 
@@ -88,8 +87,6 @@ The chatbot provides:
 ### Manual Log Management
 
 - Delete individual chat entries from the logs interface
-- Bulk operations for log management
-- Export capabilities for data analysis
 
 ## Security Features
 
