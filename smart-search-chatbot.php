@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Smart Search GraphQL Chatbot
  * Description: A chatbot that uses Smart Search AI Vector DB (GraphQL) for context and OpenAI API for LLM responses.
- * Version: 1.1
+ * Version: 1.2
  * Author: Brandon T.
  */
 
@@ -10,10 +10,173 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
+// Define plugin constants
+define( 'SSGC_VERSION', '1.2' );
+define( 'SSGC_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
+define( 'SSGC_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
+
+// Security and performance constants
+define( 'SSGC_MAX_MESSAGE_LENGTH', 500 );
+define( 'SSGC_RATE_LIMIT_REQUESTS', 10 );
+define( 'SSGC_RATE_LIMIT_WINDOW', 60 ); // seconds
+define( 'SSGC_CACHE_TTL_SEARCH', 24 * HOUR_IN_SECONDS );
+define( 'SSGC_CACHE_TTL_OPENAI', HOUR_IN_SECONDS );
+
 // Include chat logs class
 require_once plugin_dir_path( __FILE__ ) . 'chat-logs/chat-logs.php';
 global $ssc_chat_logs;
 $ssc_chat_logs = new SSC_Chat_Logs();
+
+/**
+ * Security Functions
+ */
+
+/**
+ * Check rate limiting for user requests
+ */
+function ssgc_check_rate_limit() {
+	$user_ip = ssgc_get_user_ip();
+	$rate_key = 'ssgc_rate_limit_' . md5( $user_ip );
+	$requests = get_transient( $rate_key );
+	
+	if ( false === $requests ) {
+		$requests = 0;
+	}
+	
+	if ( $requests >= SSGC_RATE_LIMIT_REQUESTS ) {
+		return new WP_Error( 'rate_limit_exceeded', 'Too many requests. Please wait before trying again.' );
+	}
+	
+	set_transient( $rate_key, $requests + 1, SSGC_RATE_LIMIT_WINDOW );
+	return true;
+}
+
+/**
+ * Get user IP address safely
+ */
+function ssgc_get_user_ip() {
+	$ip_keys = [ 'HTTP_X_FORWARDED_FOR', 'HTTP_X_REAL_IP', 'HTTP_CLIENT_IP', 'REMOTE_ADDR' ];
+	
+	foreach ( $ip_keys as $key ) {
+		if ( ! empty( $_SERVER[ $key ] ) ) {
+			$ip = sanitize_text_field( wp_unslash( $_SERVER[ $key ] ) );
+			// Handle comma-separated IPs (from proxies)
+			if ( strpos( $ip, ',' ) !== false ) {
+				$ip = trim( explode( ',', $ip )[0] );
+			}
+			if ( filter_var( $ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE ) ) {
+				return $ip;
+			}
+		}
+	}
+	
+	return $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
+}
+
+/**
+ * Validate and sanitize chat message
+ */
+function ssgc_validate_message( $message ) {
+	// Check message length
+	if ( strlen( $message ) > SSGC_MAX_MESSAGE_LENGTH ) {
+		return new WP_Error( 'message_too_long', 'Message is too long. Maximum ' . SSGC_MAX_MESSAGE_LENGTH . ' characters allowed.' );
+	}
+	
+	// Check for empty message
+	if ( empty( trim( $message ) ) ) {
+		return new WP_Error( 'empty_message', 'Message cannot be empty.' );
+	}
+	
+	// Basic content filtering
+	$blocked_patterns = [
+		'/\b(script|javascript|vbscript)\b/i',
+		'/<[^>]*>/i', // HTML tags
+		'/\b(eval|exec|system|shell_exec)\b/i',
+	];
+	
+	foreach ( $blocked_patterns as $pattern ) {
+		if ( preg_match( $pattern, $message ) ) {
+			return new WP_Error( 'invalid_content', 'Message contains invalid content.' );
+		}
+	}
+	
+	return sanitize_textarea_field( $message );
+}
+
+/**
+ * Encrypt sensitive data
+ */
+function ssgc_encrypt_data( $data ) {
+	if ( empty( $data ) ) {
+		return $data;
+	}
+	
+	$key = wp_salt( 'auth' );
+	$iv = openssl_random_pseudo_bytes( 16 );
+	$encrypted = openssl_encrypt( $data, 'AES-256-CBC', $key, 0, $iv );
+	
+	return base64_encode( $iv . $encrypted );
+}
+
+/**
+ * Decrypt sensitive data
+ */
+function ssgc_decrypt_data( $encrypted_data ) {
+	if ( empty( $encrypted_data ) ) {
+		return $encrypted_data;
+	}
+	
+	$key = wp_salt( 'auth' );
+	$data = base64_decode( $encrypted_data );
+	$iv = substr( $data, 0, 16 );
+	$encrypted = substr( $data, 16 );
+	
+	return openssl_decrypt( $encrypted, 'AES-256-CBC', $key, 0, $iv );
+}
+
+/**
+ * Performance Functions
+ */
+
+/**
+ * Generate cache key for API responses
+ */
+function ssgc_generate_cache_key( $prefix, $data ) {
+	return $prefix . '_' . md5( serialize( $data ) );
+}
+
+/**
+ * Get cached API response
+ */
+function ssgc_get_cached_response( $cache_key ) {
+	return get_transient( $cache_key );
+}
+
+/**
+ * Set cached API response
+ */
+function ssgc_set_cached_response( $cache_key, $data, $ttl ) {
+	return set_transient( $cache_key, $data, $ttl );
+}
+
+/**
+ * Log performance metrics
+ */
+function ssgc_log_performance( $operation, $start_time, $end_time = null ) {
+	if ( ! $end_time ) {
+		$end_time = microtime( true );
+	}
+	
+	$duration = round( ( $end_time - $start_time ) * 1000, 2 ); // Convert to milliseconds
+	
+	error_log( sprintf( 
+		'SSGC Performance: %s took %sms', 
+		$operation, 
+		$duration 
+	) );
+	
+	return $duration;
+}
 
 /**
  * Register settings
@@ -167,23 +330,31 @@ function ssgc_options_page_html() {
 }
 
 /**
- * Enqueue assets
+ * Track if chatbot shortcode is used on current page
+ */
+$ssgc_shortcode_used = false;
+
+/**
+ * Enqueue assets conditionally
  */
 function ssgc_enqueue_assets($hook) {
-	// Enqueue frontend assets
-	if ( ! is_admin() ) {
+	global $ssgc_shortcode_used;
+	
+	// Enqueue frontend assets only when shortcode is used
+	if ( ! is_admin() && $ssgc_shortcode_used ) {
 		wp_enqueue_script( 'jquery' );
-		wp_enqueue_script( 'ssgc-chatbot', plugin_dir_url( __FILE__ ) . 'chatbot.js', [ 'jquery' ], '1.1', true );
+		wp_enqueue_script( 'ssgc-chatbot', SSGC_PLUGIN_URL . 'chatbot.js', [ 'jquery' ], SSGC_VERSION, true );
 		wp_localize_script('ssgc-chatbot', 'ssgc_ajax', [
 			'ajax_url' => admin_url( 'admin-ajax.php' ),
 			'nonce'    => wp_create_nonce( 'ssgc_chat_nonce' ),
+			'max_length' => SSGC_MAX_MESSAGE_LENGTH,
 		]);
-		wp_enqueue_style( 'ssgc-chatbot-style', plugin_dir_url( __FILE__ ) . 'chatbot.css' );
+		wp_enqueue_style( 'ssgc-chatbot-style', SSGC_PLUGIN_URL . 'chatbot.css', [], SSGC_VERSION );
 	}
 
 	// Enqueue admin assets
 	if ( 'settings_page_ssgc-settings' === $hook ) {
-		wp_enqueue_script( 'ssgc-admin', plugin_dir_url( __FILE__ ) . 'admin.js', [], '1.0', true );
+		wp_enqueue_script( 'ssgc-admin', SSGC_PLUGIN_URL . 'admin.js', [], SSGC_VERSION, true );
 	}
 }
 
@@ -191,15 +362,39 @@ add_action( 'wp_enqueue_scripts', 'ssgc_enqueue_assets' );
 add_action( 'admin_enqueue_scripts', 'ssgc_enqueue_assets' );
 
 /**
+ * Check if shortcode is used in content
+ */
+function ssgc_check_shortcode_usage() {
+	global $post, $ssgc_shortcode_used;
+	
+	if ( is_a( $post, 'WP_Post' ) && has_shortcode( $post->post_content, 'smart_search_chatbot' ) ) {
+		$ssgc_shortcode_used = true;
+	}
+}
+
+add_action( 'wp', 'ssgc_check_shortcode_usage' );
+
+/**
  * Shortcode to display chatbot
  */
 function ssgc_display_chatbot() {
 	ob_start();
 	?>
-	<div id="ssgc-chatbot">
-		<div id="ssgc-chat-log" style="border:1px solid #ccc;height:300px;overflow:auto;padding:5px;margin-bottom:10px;"></div>
-		<input type="text" id="ssgc-chat-input" placeholder="Ask me something..." style="width:80%;">
-		<button id="ssgc-chat-send">Send</button>
+	<div id="ssgc-chatbot" role="region" aria-label="Smart Search Chatbot">
+		<div id="ssgc-chat-log" role="log" aria-live="polite" aria-label="Chat conversation"></div>
+		<div class="input-container">
+			<input type="text" 
+				   id="ssgc-chat-input" 
+				   placeholder="Ask me something..." 
+				   aria-label="Type your message here"
+				   autocomplete="off"
+				   spellcheck="true">
+			<button id="ssgc-chat-send" 
+					type="button"
+					aria-label="Send message">
+				Send
+			</button>
+		</div>
 	</div>
 	<?php
 
@@ -209,9 +404,20 @@ function ssgc_display_chatbot() {
 add_shortcode( 'smart_search_chatbot', 'ssgc_display_chatbot' );
 
 /**
- * Queries the Smart Search GraphQL API.
+ * Queries the Smart Search GraphQL API with caching.
  */
 function ssgc_query_smart_search($message, $url, $token) {
+	$start_time = microtime( true );
+	
+	// Check cache first
+	$cache_key = ssgc_generate_cache_key( 'ssgc_search', [ $message, $url ] );
+	$cached_result = ssgc_get_cached_response( $cache_key );
+	
+	if ( false !== $cached_result ) {
+		ssgc_log_performance( 'Smart Search (cached)', $start_time );
+		return $cached_result;
+	}
+	
 	$query     = <<<GRAPHQL
 query GetContext(\$message: String!, \$field: String!) {
   similarity(input: { nearest: { text: \$message, field: \$field }}) {
@@ -220,7 +426,7 @@ query GetContext(\$message: String!, \$field: String!) {
 }
 GRAPHQL;
 	$variables = [
-		'message' => $message,
+		'message' => sanitize_text_field( $message ),
 		'field'   => 'post_content',
 	];
 	$body      = json_encode( [
@@ -231,24 +437,48 @@ GRAPHQL;
 	$response = wp_remote_post($url, [
 		'headers' => [
 			'Content-Type'  => 'application/json',
-			'Authorization' => 'Bearer ' . $token,
+			'Authorization' => 'Bearer ' . sanitize_text_field( $token ),
 		],
 		'body'    => $body,
+		'timeout' => 30,
 	]);
 
 	if ( is_wp_error( $response ) ) {
+		ssgc_log_performance( 'Smart Search (error)', $start_time );
 		return new WP_Error( 'smart_search_error', 'Error contacting Smart Search service.' );
 	}
 
-	$data = json_decode( wp_remote_retrieve_body( $response ), true );
+	$response_code = wp_remote_retrieve_response_code( $response );
+	if ( $response_code !== 200 ) {
+		ssgc_log_performance( 'Smart Search (error)', $start_time );
+		return new WP_Error( 'smart_search_error', 'Smart Search service returned error: ' . $response_code );
+	}
 
-	return $data['data']['similarity']['docs'] ?? [];
+	$data = json_decode( wp_remote_retrieve_body( $response ), true );
+	$result = $data['data']['similarity']['docs'] ?? [];
+	
+	// Cache the result
+	ssgc_set_cached_response( $cache_key, $result, SSGC_CACHE_TTL_SEARCH );
+	
+	ssgc_log_performance( 'Smart Search (API)', $start_time );
+	return $result;
 }
 
 /**
- * Queries the OpenAI API.
+ * Queries the OpenAI API with caching.
  */
 function ssgc_query_openai($context, $message, $api_key) {
+	$start_time = microtime( true );
+	
+	// Check cache first
+	$cache_key = ssgc_generate_cache_key( 'ssgc_openai', [ $context, $message ] );
+	$cached_result = ssgc_get_cached_response( $cache_key );
+	
+	if ( false !== $cached_result ) {
+		ssgc_log_performance( 'OpenAI (cached)', $start_time );
+		return $cached_result;
+	}
+	
 	$prompt = "Use the following context to answer the question.\n\nContext:\n$context\n\nQuestion: $message\nAnswer:";
 	$body   = json_encode([
 		'model'       => 'gpt-4o-mini',
@@ -259,37 +489,67 @@ function ssgc_query_openai($context, $message, $api_key) {
 			],
 			[
 				'role'    => 'user',
-				'content' => $prompt,
+				'content' => sanitize_textarea_field( $prompt ),
 			],
 		],
 		'temperature' => 0.7,
+		'max_tokens'  => 500,
 	]);
 
 	$response = wp_remote_post('https://api.openai.com/v1/chat/completions', [
 		'headers' => [
 			'Content-Type'  => 'application/json',
-			'Authorization' => 'Bearer ' . $api_key,
+			'Authorization' => 'Bearer ' . sanitize_text_field( $api_key ),
 		],
 		'body'    => $body,
+		'timeout' => 30,
 	]);
 
 	if ( is_wp_error( $response ) ) {
+		ssgc_log_performance( 'OpenAI (error)', $start_time );
 		return new WP_Error( 'openai_error', 'Error contacting OpenAI API.' );
 	}
 
-	$data = json_decode( wp_remote_retrieve_body( $response ), true );
+	$response_code = wp_remote_retrieve_response_code( $response );
+	if ( $response_code !== 200 ) {
+		ssgc_log_performance( 'OpenAI (error)', $start_time );
+		return new WP_Error( 'openai_error', 'OpenAI API returned error: ' . $response_code );
+	}
 
-	return $data['choices'][0]['message']['content'] ?? 'No answer generated.';
+	$data = json_decode( wp_remote_retrieve_body( $response ), true );
+	$result = $data['choices'][0]['message']['content'] ?? 'No answer generated.';
+	
+	// Cache the result
+	ssgc_set_cached_response( $cache_key, $result, SSGC_CACHE_TTL_OPENAI );
+	
+	ssgc_log_performance( 'OpenAI (API)', $start_time );
+	return $result;
 }
 
 /**
- * Handle chatbot AJAX request
+ * Handle chatbot AJAX request with security checks
  */
 function ssgc_handle_chat_request() {
+	$start_time = microtime( true );
+	
+	// Security checks
 	check_ajax_referer( 'ssgc_chat_nonce', 'nonce' );
+	
+	// Check rate limiting
+	$rate_check = ssgc_check_rate_limit();
+	if ( is_wp_error( $rate_check ) ) {
+		wp_send_json_error( [ 'reply' => $rate_check->get_error_message() ] );
+	}
+	
+	// Validate and sanitize message
+	$raw_message = $_POST['message'] ?? '';
+	$message = ssgc_validate_message( $raw_message );
+	
+	if ( is_wp_error( $message ) ) {
+		wp_send_json_error( [ 'reply' => $message->get_error_message() ] );
+	}
 
 	global $ssc_chat_logs;
-	$message = sanitize_text_field( $_POST['message'] );
 
 	// Fetch API credentials
 	$use_smart_search_settings = get_option( 'ssgc_use_smart_search_settings' );
@@ -306,6 +566,11 @@ function ssgc_handle_chat_request() {
 	}
 	
 	$openai_api_key = get_option( 'ssgc_openai_api_key' );
+	
+	// Validate API credentials
+	if ( empty( $smart_search_url ) || empty( $smart_search_token ) || empty( $openai_api_key ) ) {
+		wp_send_json_error( [ 'reply' => 'Chatbot is not properly configured. Please contact the administrator.' ] );
+	}
 
 	// Get context from Smart Search
 	$docs = ssgc_query_smart_search( $message, $smart_search_url, $smart_search_token );
@@ -315,7 +580,7 @@ function ssgc_handle_chat_request() {
 	}
 
 	if ( empty( $docs ) ) {
-		wp_send_json_success( [ 'reply' => "Sorry, I couldn't find an answer." ] );
+		wp_send_json_success( [ 'reply' => "Sorry, I couldn't find an answer to your question." ] );
 	}
 
 	$context = implode(
@@ -333,12 +598,15 @@ function ssgc_handle_chat_request() {
 		wp_send_json_error( [ 'reply' => $reply->get_error_message() ] );
 	}
 
-	// Log and send reply
+	// Log chat interaction
 	if ( isset( $ssc_chat_logs ) ) {
 		$ssc_chat_logs->log_chat( $message, $reply );
 	}
+	
+	// Log total request performance
+	ssgc_log_performance( 'Total chat request', $start_time );
 
-	wp_send_json_success( [ 'reply' => $reply ] );
+	wp_send_json_success( [ 'reply' => sanitize_text_field( $reply ) ] );
 }
 
 add_action( 'wp_ajax_ssgc_chat', 'ssgc_handle_chat_request' );

@@ -98,23 +98,78 @@ class SSC_Chat_Logs {
             question TEXT NOT NULL,
             answer TEXT NOT NULL,
             created_at DATETIME NOT NULL,
-            PRIMARY KEY (id)
+            user_ip VARCHAR(45) DEFAULT NULL,
+            PRIMARY KEY (id),
+            KEY idx_created_at (created_at),
+            KEY idx_created_at_id (created_at, id),
+            KEY idx_user_ip_created (user_ip, created_at)
         ) $charset_collate;";
 
         require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
         dbDelta($sql);
+        
+        // Add indexes if they don't exist (for existing installations)
+        $this->add_missing_indexes();
+    }
+    
+    /**
+     * Add missing indexes for existing installations
+     */
+    private function add_missing_indexes() {
+        global $wpdb;
+        
+        // Check if indexes exist and add them if missing
+        $indexes = [
+            'idx_created_at' => "ALTER TABLE {$this->table_name} ADD INDEX idx_created_at (created_at)",
+            'idx_created_at_id' => "ALTER TABLE {$this->table_name} ADD INDEX idx_created_at_id (created_at, id)",
+            'idx_user_ip_created' => "ALTER TABLE {$this->table_name} ADD INDEX idx_user_ip_created (user_ip, created_at)"
+        ];
+        
+        foreach ($indexes as $index_name => $sql) {
+            $index_exists = $wpdb->get_var($wpdb->prepare(
+                "SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS 
+                WHERE table_schema = %s AND table_name = %s AND index_name = %s",
+                DB_NAME,
+                $this->table_name,
+                $index_name
+            ));
+            
+            if (!$index_exists) {
+                $wpdb->query($sql);
+            }
+        }
+        
+        // Add user_ip column if it doesn't exist
+        $column_exists = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS 
+            WHERE table_schema = %s AND table_name = %s AND column_name = 'user_ip'",
+            DB_NAME,
+            $this->table_name
+        ));
+        
+        if (!$column_exists) {
+            $wpdb->query("ALTER TABLE {$this->table_name} ADD COLUMN user_ip VARCHAR(45) DEFAULT NULL");
+        }
     }
 
     public function log_chat($question, $answer) {
         global $wpdb;
+        
+        // Get user IP if available (for analytics and rate limiting correlation)
+        $user_ip = null;
+        if (function_exists('ssgc_get_user_ip')) {
+            $user_ip = ssgc_get_user_ip();
+        }
+        
         $wpdb->insert(
             $this->table_name,
             [
                 'question'   => $question,
                 'answer'     => $answer,
                 'created_at' => current_time('mysql'),
+                'user_ip'    => $user_ip,
             ],
-            ['%s', '%s', '%s']
+            ['%s', '%s', '%s', '%s']
         );
     }
 
