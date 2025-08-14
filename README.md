@@ -213,20 +213,20 @@ define('WP_DEBUG_LOG', true);
 
 ## Version History
 
-### Version 1.2
+### Version 1.3
 - Enhanced security features
 - Performance optimizations
 - Improved chat logging
 - Better error handling
 - Mobile responsiveness improvements
 
-### Version 1.1
+### Version 1.2
 - Added chat logs functionality
 - Implemented caching system
 - Security enhancements
 - Rate limiting features
 
-### Version 1.0
+### Version 1.1
 - Initial release
 - Basic chatbot functionality
 - Smart Search integration
