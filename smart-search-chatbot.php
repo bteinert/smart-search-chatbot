@@ -2,8 +2,11 @@
 /**
  * Plugin Name: Smart Search GraphQL Chatbot
  * Description: A chatbot that uses Smart Search AI Vector DB (GraphQL) for context and OpenAI API for LLM responses.
- * Version: 1.2
+ * Version: 1.3
  * Author: Brandon T.
+ * GitHub Plugin URI: bteinert/smart-search-chatbot
+ * GitHub Plugin URI: https://github.com/bteinert/smart-search-chatbot
+ * Primary Branch: main
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
